@@ -1,0 +1,17 @@
+name: hermes-mobile-notify
+version: "1.2.0"
+description: Hermes Mobile - notification FCM avec sujet et extrait de réponse à chaque fin de tour ; commandes /hermes-mobile-token et /hermes-mobile-quotas.
+author: Hermes Mobile
+homepage: https://github.com/alanmlcrt/hermes-mobile-notify
+hooks:
+  - on_session_end
+provides_hooks:
+  - on_session_end
+config_schema:
+  service_account_json:
+    type: secret
+    env: HERMES_MOBILE_SERVICE_ACCOUNT_JSON
+    label: Compte de service Firebase
+    description: >-
+      Contenu JSON du compte de service Firebase, ou le même JSON encodé en
+      base64. Laisser vide pour lire HERMES_HOME/hermes-mobile/service-account.json.
