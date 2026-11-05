@@ -860,7 +860,7 @@ def _self_check():
     global _LOG_PATH, _hermes_home, _load_credentials, _post, _spawn, _RETRY_DELAY, _read_secret
     saved = (_LOG_PATH, _hermes_home, _load_credentials, _post, _spawn, _RETRY_DELAY, _read_secret)
     saved_key_env = os.environ.pop(_KEY_ENV, None)
-    token = "synthetic-fcm-token-0123456789-ABCDEFGH"
+    token = "synthetic-ABCDEFGH"
     hooks, commands, sent, threads, records, spawned = {}, {}, [], [], [], []
 
     class _Ctx:
