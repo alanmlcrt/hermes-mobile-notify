@@ -1,0 +1,12 @@
+{
+  "name": "hermes-mobile-notify",
+  "label": "Hermes Mobile",
+  "description": "Routes des brouillons de l'app Hermes Mobile. Aucun onglet.",
+  "icon": "Mail",
+  "version": "1.5.0",
+  "tab": {
+    "hidden": true
+  },
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}

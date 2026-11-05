@@ -29,8 +29,8 @@ Mails : aucun réglage. Une fois le plugin chargé, chaque `gmail send` ou
 `gmail reply` du skill Google Workspace demande une validation par carte dans
 l'app.
 
-Brouillons : installer aussi `hermes plugins install arsiktech/hermes-draft-cards
---enable`, puis redémarrer Hermes. Les nouvelles conversations affichent les
-brouillons en carte avec Modifier et Envoyer.
+Brouillons : aucun réglage. Après redémarrage de Hermes, les nouvelles
+conversations affichent les brouillons en carte avec Modifier et Envoyer. Retirer
+`draft-cards` s'il est installé : `hermes plugins remove draft-cards`.
 
 Ne jamais copier la clé Firebase dans le dépôt ni dans le dossier du plugin.
