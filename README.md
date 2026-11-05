@@ -113,8 +113,8 @@ Si la mise à jour échoue (ancienne copie manuelle par exemple), réinstaller :
 hermes plugins install alanmlcrt/hermes-mobile-notify --force --enable
 ```
 
-Puis redémarrer Hermes. Version actuelle : **1.2.0** (quotas de compte pour l'accueil de
-l'app). Le sujet et l'extrait de réponse datent de la 1.1.0 ; mettre aussi l'app à
+Puis redémarrer Hermes. Version actuelle : **1.3.0** (carte de validation avant chaque envoi de mail). Les quotas de compte pour l'accueil de
+l'app datent de la 1.2.0, le sujet et l'extrait de réponse de la 1.1.0 ; mettre aussi l'app à
 jour pour l'affichage au premier plan. Le réglage
 secret et la lecture du JSON en base64 datent de la 1.0.3.
 

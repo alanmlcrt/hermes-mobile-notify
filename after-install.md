@@ -25,4 +25,8 @@ fin d'un tour. La notification doit arriver. En cas de silence, consulter
 `HERMES_HOME/plugins/hermes-mobile-notify/session-end.jsonl` (`no_token`,
 `no_key`, `key_invalid`…) et `logs/agent.log`.
 
+Mails : aucun réglage. Une fois le plugin chargé, chaque `gmail send` ou
+`gmail reply` du skill Google Workspace demande une validation par carte dans
+l'app.
+
 Ne jamais copier la clé Firebase dans le dépôt ni dans le dossier du plugin.

@@ -11,6 +11,8 @@ Le compte de service vient de la variable ``HERMES_MOBILE_SERVICE_ACCOUNT_JSON``
 ``HERMES_HOME/hermes-mobile/service-account.json`` (hors dossier du plugin).
 Notification avec sujet et extrait de réponse ; ``data`` ne porte que ``outcome`` et
 ``sessionId``. Le contenu est lu en lecture seule dans state.db, jamais journalisé.
+- ``pre_tool_call`` fait valider chaque envoi de mail par une carte dans l'app :
+  la règle vit ici, donc réinstaller le plugin suffit sur un nouveau Hermes.
 Le journal ``session-end.jsonl`` (dossier du plugin) et ``agent.log``
 ne gardent du jeton que ses 8 derniers caractères. Aucune erreur ne remonte au tour.
 
@@ -25,6 +27,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import sqlite3
 import threading
 import time
@@ -58,6 +61,38 @@ _ROUTINE_BODIES = {
     "stopped": "Routine arrêtée",
 }
 _CHANNEL = "hermes_turn_complete"
+
+# Carte de mail : `description` de l'autorisation = préfixe + JSON, lu par l'app
+# (lib/ui/components/approval_card.dart).
+_MAIL_CARD_PREFIX = "hermes-mobile-mail:"
+_MAIL_COMMAND = re.compile(r"\bgmail\s+(?:send|reply)\b")
+# Autres chemins vers Gmail : l'agent est renvoyé vers la commande vérifiable.
+# ponytail: filet par motifs, pas une barrière ; un script maison qui appelle
+# l'API autrement passe. Barrière réelle = retirer l'accès direct au jeton.
+_MAIL_BYPASS = re.compile(
+    r"gws\s+gmail\b.*\bsend\b|gmail\.googleapis\.com\S*messages/send|\.messages\(\)\s*\.send\(",
+    re.DOTALL,
+)
+_MAIL_FLAGS = {
+    "--to": "to",
+    "--cc": "cc",
+    "--from": "from",
+    "--subject": "subject",
+    "--body": "body",
+    "--thread-id": "thread_id",
+}
+_SHELL_OPERATORS = set(";&|()<>\n")
+_MAIL_RETRY = (
+    "Email not sent. Run the Google Workspace script as a single `gmail send --to ... "
+    "--subject ... --body ...` (or `gmail reply MESSAGE_ID --body ...`) command, with "
+    "literal values: no $variables, $(...), backticks or files. The user must see the "
+    "exact message on a confirmation card."
+)
+_MAIL_PROMPT = (
+    "Sending email: run `gmail send` or `gmail reply` directly, with literal argument "
+    "values. Hermes shows the user a confirmation card with the exact message before "
+    "it leaves, so do not ask for confirmation in chat first."
+)
 _TTL = "86400s"
 
 _ALLOWED = (
@@ -101,6 +136,10 @@ def register(ctx):
         _cmd_quotas,
         description="Hermes Mobile : quotas 5h et 7 jours des comptes IA, en JSON.",
     )
+    ctx.register_hook("pre_tool_call", _on_pre_tool_call)
+    # Absente des builds anciens : la carte fonctionne sans, l'agent confirme alors aussi dans le chat.
+    if hasattr(ctx, "register_system_prompt_section"):
+        ctx.register_system_prompt_section("hermes-mobile-mail", _MAIL_PROMPT)
 
 
 # --- chemins ---------------------------------------------------------------
@@ -244,6 +283,80 @@ def _cmd_quotas(raw_args=""):
 
 
 # --- hook on_session_end ----------------------------------------------------
+
+
+def _shell_tokens(command):
+    """Mots d'une commande shell, opérateurs à part ; ``ValueError`` si les guillemets sont ouverts."""
+    lexer = shlex.shlex(
+        command.replace("\\\n", " "),
+        posix=True,
+        punctuation_chars="".join(sorted(_SHELL_OPERATORS)),
+    )
+    lexer.whitespace = " \t\r"
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    return list(lexer)
+
+
+def _literal(value):
+    # ponytail: les guillemets sont perdus ici, donc un « $5 » littéral est refusé
+    # comme une expansion ; l'agent reformule, le mail affiché reste le mail envoyé.
+    return value is not None and "`" not in value and not re.search(r"\$[\w({]", value)
+
+
+def _parse_mail(command):
+    """Mail porté par ``command``, ou ``None`` s'il ne peut pas être montré tel qu'il partira."""
+    try:
+        tokens = _shell_tokens(command)
+    except ValueError:
+        return None
+    starts = [
+        i for i in range(len(tokens) - 1)
+        if tokens[i] == "gmail" and tokens[i + 1] in ("send", "reply")
+    ]
+    if len(starts) != 1:
+        return None
+    kind = tokens[starts[0] + 1]
+    mail = {"kind": kind}
+    rest = iter(tokens[starts[0] + 2:])
+    for token in rest:
+        if token and set(token) <= _SHELL_OPERATORS:
+            break
+        flag, equals, inline = token.partition("=")
+        if token == "--html":
+            mail["html"] = True
+        elif flag in _MAIL_FLAGS:
+            value = inline if equals else next(rest, None)
+            if not _literal(value):
+                return None
+            mail[_MAIL_FLAGS[flag]] = value
+        elif kind == "reply" and "message_id" not in mail and _literal(token):
+            mail["message_id"] = token
+        else:
+            return None
+    required = ("to", "subject", "body") if kind == "send" else ("message_id", "body")
+    return mail if all(key in mail for key in required) else None
+
+
+def _on_pre_tool_call(tool_name="", args=None, **_):
+    """Carte pour un envoi de mail ; refus s'il ne peut pas être montré (Hermes ignore une erreur de hook)."""
+    try:
+        key = {"terminal": "command", "execute_code": "code"}.get(tool_name)
+        text = (args or {}).get(key) if key else None
+        if not isinstance(text, str):
+            return None
+        if tool_name == "terminal" and _MAIL_COMMAND.search(text):
+            mail = _parse_mail(text)
+            if mail is not None:
+                return {
+                    "action": "approve",
+                    "message": _MAIL_CARD_PREFIX + json.dumps(mail, ensure_ascii=False),
+                }
+        elif not (_MAIL_COMMAND.search(text) or _MAIL_BYPASS.search(text)):
+            return None
+    except Exception:
+        logger.exception("hermes-mobile-notify: lecture de l'envoi de mail impossible")
+    return {"action": "block", "message": _MAIL_RETRY}
 
 
 def _outcome(kwargs):
@@ -560,6 +673,51 @@ _post = _http_post
 # --- auto-vérification --------------------------------------------------------
 
 
+def _self_check_mail():
+    def decide(command, tool="terminal", key="command"):
+        return _on_pre_tool_call(tool_name=tool, args={key: command})
+
+    def card(command):
+        decision = decide(command)
+        assert decision and decision["action"] == "approve", decision
+        assert decision["message"].startswith(_MAIL_CARD_PREFIX)
+        return json.loads(decision["message"][len(_MAIL_CARD_PREFIX):])
+
+    gapi = 'GAPI="python /h/skills/google_api.py"\n$GAPI '
+    assert card(gapi + """gmail send --to a@b.fr --subject 'Été; ok' --body "L1
+L2 && pas une commande" --cc c@d.fr --html""") == {
+        "kind": "send", "to": "a@b.fr", "subject": "Été; ok",
+        "body": "L1\nL2 && pas une commande", "cc": "c@d.fr", "html": True,
+    }
+    assert card("cd /tmp && python g.py gmail send \\\n --to=a@b.fr --subject s --body b && echo fini") == {
+        "kind": "send", "to": "a@b.fr", "subject": "s", "body": "b",
+    }
+    assert card("$GAPI gmail reply 18f --body Merci") == {
+        "kind": "reply", "message_id": "18f", "body": "Merci",
+    }
+    # Ce qui ne peut pas être montré tel quel ne part pas.
+    for command in (
+        '$GAPI gmail send --to a@b.fr --subject s --body "$(cat f.txt)"',
+        '$GAPI gmail send --to "$DEST" --subject s --body b',
+        "$GAPI gmail send --to a@b.fr --subject s --body `cat f`",
+        "$GAPI gmail send --to a@b.fr --subject s",
+        "$GAPI gmail send --to a@b.fr --subject s --body b --attach x",
+        "$GAPI gmail send --to a@b.fr --subject 'ouvert --body b",
+        "$GAPI gmail send --to a --subject s --body b; $GAPI gmail send --to c --subject s --body b",
+        "bash -c 'python g.py gmail send --to a --subject s --body b'",
+        "gws gmail users messages send --params x",
+        "curl https://gmail.googleapis.com/gmail/v1/users/me/messages/send -d x",
+    ):
+        assert decide(command)["action"] == "block", command
+    assert decide("service.users().messages().send(userId='me')", "execute_code", "code")["action"] == "block"
+    assert decide("subprocess.run('g.py gmail send --to a', shell=True)", "execute_code", "code")["action"] == "block"
+    # Le reste passe sans carte.
+    for command in ("ls -la", "$GAPI gmail search 'is:unread'", "$GAPI gmail get 18f", "gws gmail users messages list"):
+        assert decide(command) is None, command
+    assert _on_pre_tool_call(tool_name="read_file", args={"path": "gmail send"}) is None
+    assert _on_pre_tool_call(tool_name="terminal", args=None) is None
+
+
 def _self_check_quotas(cmd):
     global _account_usage, _quota_cache
     from types import SimpleNamespace as Row
@@ -631,7 +789,7 @@ def _self_check():
             return json.loads(fh.readlines()[-1]), elapsed
 
     register(_Ctx())
-    assert set(hooks) == {"on_session_end"}
+    assert set(hooks) == {"on_session_end", "pre_tool_call"}
     assert set(commands) == {"hermes-mobile-token", "hermes-mobile-quotas"}
     _self_check_quotas(commands["hermes-mobile-quotas"])
     cmd, capture = commands["hermes-mobile-token"], _Capture()
@@ -892,6 +1050,7 @@ def _self_check():
             if saved_key_env is not None:
                 os.environ[_KEY_ENV] = saved_key_env
             logger.removeHandler(capture)
+    _self_check_mail()
     print("hermes-mobile-notify: auto-vérification réussie")
 
 
