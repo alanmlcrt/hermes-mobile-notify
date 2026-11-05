@@ -13,6 +13,8 @@ Notification avec sujet et extrait de réponse ; ``data`` ne porte que ``outcome
 ``sessionId``. Le contenu est lu en lecture seule dans state.db, jamais journalisé.
 - ``pre_tool_call`` fait valider chaque envoi de mail par une carte dans l'app :
   la règle vit ici, donc réinstaller le plugin suffit sur un nouveau Hermes.
+- ``/hermes-mobile-mail-ok`` retient l'empreinte d'un brouillon validé dans l'app
+  (plugin ``draft-cards``) : ce mail-là part sans seconde carte.
 Le journal ``session-end.jsonl`` (dossier du plugin) et ``agent.log``
 ne gardent du jeton que ses 8 derniers caractères. Aucune erreur ne remonte au tour.
 
@@ -22,6 +24,7 @@ encore ce jeton (l'app le renverra au prochain message). Pas de file durable.
 """
 
 import base64
+import hashlib
 import hashlib
 import json
 import logging
@@ -93,6 +96,20 @@ _MAIL_PROMPT = (
     "values. Hermes shows the user a confirmation card with the exact message before "
     "it leaves, so do not ask for confirmation in chat first."
 )
+_DRAFT_PROMPT = (
+    "Drafts: when the user asks you to write or draft an email or message without "
+    "sending it yet, call `draft_card` if that tool exists. This app renders cards like "
+    "the desktop app: write one short line, then the returned `card` line alone on its "
+    "own line, and never `text_fallback` or the draft text. The user edits and approves "
+    "on the card; the app then posts a message naming the draft and its version, and "
+    "you send it as the draft-cards skill describes."
+)
+# Empreintes des brouillons validés dans l'app : usage unique, 15 min.
+_MAIL_OK_FILE = "mail-approved.json"
+_MAIL_OK_TTL = 900
+_MAIL_OK_USAGE = "Usage : /hermes-mobile-mail-ok <empreinte> [empreinte]"
+_MAIL_ADDRESS = re.compile(r"[^\s<>,;\"]+@[^\s<>,;\"]+")
+_mail_ok_lock = threading.Lock()
 _TTL = "86400s"
 
 _ALLOWED = (
@@ -136,10 +153,16 @@ def register(ctx):
         _cmd_quotas,
         description="Hermes Mobile : quotas 5h et 7 jours des comptes IA, en JSON.",
     )
+    ctx.register_command(
+        "hermes-mobile-mail-ok",
+        _cmd_mail_ok,
+        description="Hermes Mobile : brouillon de mail validé dans l'app.",
+        args_hint="<empreinte> [empreinte]",
+    )
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)
     # Absente des builds anciens : la carte fonctionne sans, l'agent confirme alors aussi dans le chat.
     if hasattr(ctx, "register_system_prompt_section"):
-        ctx.register_system_prompt_section("hermes-mobile-mail", _MAIL_PROMPT)
+        ctx.register_system_prompt_section("hermes-mobile-mail", _mail_prompt)
 
 
 # --- chemins ---------------------------------------------------------------
@@ -338,6 +361,67 @@ def _parse_mail(command):
     return mail if all(key in mail for key in required) else None
 
 
+def _mail_prompt(session_info):
+    # Seule l'app (`tui`) sait afficher `::draft-card` ; ailleurs le skill garde `text_fallback`.
+    return f"{_MAIL_PROMPT}\n{_DRAFT_PROMPT}" if session_info.get("platform") == "tui" else _MAIL_PROMPT
+
+
+def _digest(*parts):
+    return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()
+
+
+def _addresses(value):
+    return ",".join(sorted(a.lower() for a in _MAIL_ADDRESS.findall(value or "")))
+
+
+def _mail_fingerprint(mail):
+    """Même calcul que ``mailFingerprints`` côté app ; une réponse n'a que son corps à comparer."""
+    body = mail["body"].replace("\r\n", "\n").strip()
+    if mail["kind"] == "reply":
+        return _digest(body)
+    return _digest(_addresses(mail["to"]), _addresses(mail.get("cc")), mail["subject"].strip(), body)
+
+
+def _approved_mails():
+    now = time.time()
+    try:
+        saved = json.loads((_state_dir() / _MAIL_OK_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in saved.items() if v > now} if isinstance(saved, dict) else {}
+
+
+def _save_approved_mails(approved):
+    state = _state_dir()
+    state.mkdir(parents=True, exist_ok=True)
+    (state / _MAIL_OK_FILE).write_text(json.dumps(approved), encoding="utf-8")
+
+
+def _cmd_mail_ok(raw_args=""):
+    digests = raw_args.split() if isinstance(raw_args, str) else []
+    if not digests or len(digests) > 2 or not all(re.fullmatch(r"[0-9a-f]{64}", d) for d in digests):
+        return _MAIL_OK_USAGE
+    with _mail_ok_lock:
+        approved = _approved_mails()
+        approved.update(dict.fromkeys(digests, time.time() + _MAIL_OK_TTL))
+        _save_approved_mails(approved)
+    return "ok"
+
+
+def _take_approved_mail(mail):
+    # ponytail: même limite que les motifs ci-dessus, un agent qui écrit ce fichier
+    # passerait ; il ne peut pas appeler la commande, et le statut `approved` de
+    # draft-cards ne suffit pas car l'agent peut le poser lui-même.
+    digest = _mail_fingerprint(mail)
+    with _mail_ok_lock:
+        approved = _approved_mails()
+        if digest not in approved:
+            return False
+        del approved[digest]
+        _save_approved_mails(approved)
+    return True
+
+
 def _on_pre_tool_call(tool_name="", args=None, **_):
     """Carte pour un envoi de mail ; refus s'il ne peut pas être montré (Hermes ignore une erreur de hook)."""
     try:
@@ -348,6 +432,8 @@ def _on_pre_tool_call(tool_name="", args=None, **_):
         if tool_name == "terminal" and _MAIL_COMMAND.search(text):
             mail = _parse_mail(text)
             if mail is not None:
+                if _take_approved_mail(mail):
+                    return None
                 return {
                     "action": "approve",
                     "message": _MAIL_CARD_PREFIX + json.dumps(mail, ensure_ascii=False),
@@ -509,6 +595,7 @@ def _excerpt(value, max_bytes):
         return ""
     value = re.sub(r"<think>.*?(?:</think>|$)", "", value, flags=re.S | re.I)
     value = re.sub(r"```.*?(?:```|$)", "", value, flags=re.S)
+    value = re.sub(r"::draft-card\{[^}]*\}", "", value)
     value = re.sub(r"!?\[([^\]]+)\]\([^)]*\)", r"\1", value)
     value = re.sub(r"(?m)^\s*(?:#{1,6}\s+|[-*>]\s+|\d+[.)]\s+)", "", value)
     value = re.sub(r"[*_`]+", "", value)
@@ -717,6 +804,23 @@ L2 && pas une commande" --cc c@d.fr --html""") == {
     assert _on_pre_tool_call(tool_name="read_file", args={"path": "gmail send"}) is None
     assert _on_pre_tool_call(tool_name="terminal", args=None) is None
 
+    # Brouillon validé dans l'app : ce mail exact part une fois, sans seconde carte.
+    send = "$GAPI gmail send --to 'Ana <A@b.fr>' --subject Devis --body 'Bonjour'"
+    fingerprint = _mail_fingerprint({"kind": "send", "to": "a@b.fr", "subject": "Devis", "body": "Bonjour\n"})
+    # Même valeur attendue dans test/draft_card_test.dart.
+    assert fingerprint == "f142c04b27383d7e5d092f96a4c6459f39b9bc99b05f3907f7195ebb766546f3"
+    assert _cmd_mail_ok("pas-une-empreinte") == _MAIL_OK_USAGE
+    assert _cmd_mail_ok(fingerprint + " " + _digest("Merci")) == "ok"
+    assert decide(send.replace("Bonjour", "Autre"))["action"] == "approve"
+    assert decide(send) is None
+    assert decide(send)["action"] == "approve"
+    assert decide("$GAPI gmail reply 18f --body Merci") is None
+    (_state_dir() / _MAIL_OK_FILE).write_text(json.dumps({fingerprint: time.time() - 1}), encoding="utf-8")
+    assert decide(send)["action"] == "approve"
+    assert _DRAFT_PROMPT in _mail_prompt({"platform": "tui"})
+    assert _DRAFT_PROMPT not in _mail_prompt({"platform": "telegram"})
+    assert _excerpt('Voici.\n::draft-card{id="d_1a2b3c4d" v="1"}', 100) == "Voici."
+
 
 def _self_check_quotas(cmd):
     global _account_usage, _quota_cache
@@ -790,7 +894,7 @@ def _self_check():
 
     register(_Ctx())
     assert set(hooks) == {"on_session_end", "pre_tool_call"}
-    assert set(commands) == {"hermes-mobile-token", "hermes-mobile-quotas"}
+    assert set(commands) == {"hermes-mobile-token", "hermes-mobile-quotas", "hermes-mobile-mail-ok"}
     _self_check_quotas(commands["hermes-mobile-quotas"])
     cmd, capture = commands["hermes-mobile-token"], _Capture()
     logger.addHandler(capture)
@@ -1050,7 +1154,12 @@ def _self_check():
             if saved_key_env is not None:
                 os.environ[_KEY_ENV] = saved_key_env
             logger.removeHandler(capture)
-    _self_check_mail()
+    with tempfile.TemporaryDirectory() as tmp:
+        saved_home, _hermes_home = _hermes_home, lambda: Path(tmp)
+        try:
+            _self_check_mail()
+        finally:
+            _hermes_home = saved_home
     print("hermes-mobile-notify: auto-vérification réussie")
 
 

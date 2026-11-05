@@ -36,6 +36,13 @@ Auto-vérification :
   compte illisible renvoie `{}` et l'app affiche `—`. Ces chiffres viennent de
   routes non documentées d'OpenAI et d'Anthropic, qui peuvent changer.
 
+- Commande `/hermes-mobile-mail-ok <empreinte> [empreinte]` : appelée par l'app
+  quand un brouillon est validé sur sa carte. Le mail correspondant part une
+  fois sans seconde carte, pendant 15 minutes. Les brouillons eux-mêmes viennent
+  du plugin communautaire
+  [`draft-cards`](https://github.com/arsiktech/hermes-draft-cards), à installer
+  à côté (voir `after-install.md`).
+
 ## Installation
 
 Dans le terminal Hermes du profil à notifier :
@@ -113,7 +120,7 @@ Si la mise à jour échoue (ancienne copie manuelle par exemple), réinstaller :
 hermes plugins install alanmlcrt/hermes-mobile-notify --force --enable
 ```
 
-Puis redémarrer Hermes. Version actuelle : **1.3.0** (carte de validation avant chaque envoi de mail). Les quotas de compte pour l'accueil de
+Puis redémarrer Hermes. Version actuelle : **1.4.0** (carte de validation avant chaque envoi de mail, cartes de brouillon). Les quotas de compte pour l'accueil de
 l'app datent de la 1.2.0, le sujet et l'extrait de réponse de la 1.1.0 ; mettre aussi l'app à
 jour pour l'affichage au premier plan. Le réglage
 secret et la lecture du JSON en base64 datent de la 1.0.3.

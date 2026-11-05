@@ -1,6 +1,6 @@
 name: hermes-mobile-notify
-version: "1.3.0"
-description: Hermes Mobile - notification FCM avec sujet et extrait de réponse à chaque fin de tour ; commandes /hermes-mobile-token et /hermes-mobile-quotas ; carte de validation avant chaque envoi de mail.
+version: "1.4.0"
+description: Hermes Mobile - notification FCM avec sujet et extrait de réponse à chaque fin de tour ; commandes /hermes-mobile-token et /hermes-mobile-quotas ; carte de validation avant chaque envoi de mail, brouillons par draft-cards.
 author: Hermes Mobile
 homepage: https://github.com/alanmlcrt/hermes-mobile-notify
 hooks:
